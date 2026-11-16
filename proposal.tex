@@ -1,0 +1,205 @@
+\documentclass[12pt]{article}
+
+% ---------- Page setup: 1-inch margins, 12-pt font ----------
+\usepackage[margin=1in]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{microtype}
+\usepackage{amsmath,amssymb}
+\usepackage{xcolor}
+\usepackage{enumitem}
+\usepackage[compact]{titlesec}
+\usepackage[authoryear,round]{natbib}
+\usepackage[colorlinks=true,linkcolor=blue!50!black,citecolor=blue!50!black,urlcolor=blue!50!black]{hyperref}
+
+% Compact spacing so the body fits in two pages
+\titleformat{\section}{\large\bfseries}{\thesection}{0.5em}{}
+\titlespacing*{\section}{0pt}{6pt}{2pt}
+\setlist{nosep,leftmargin=*}
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{3pt}
+\newcommand{\rdir}{\hat{r}}
+
+\begin{document}
+
+% ---------- Title block (manual, to save space) ----------
+\begin{center}
+{\Large\bfseries Does Directional Dropout Make Refusal Harder to Remove?}\\[1pt]
+{\large Self-Distillation under Random Ablation of the Refusal Direction}\\[3pt]
+Ryan Xu \quad Julien Schweighofer \quad Michelle Koga \quad Rushil Saraf\\
+{\small Topic: Safety of open-weight models}
+\end{center}
+\vspace{-6pt}
+
+% ---------- Abstract (4 sentences) ----------
+\textbf{Abstract.}
+Safety in open-weight models is easy to remove: projecting a single refusal direction out of the weights (abliteration) makes a model comply with harmful requests.
+We ask whether training a model to refuse while its refusal direction is randomly erased, a form of directional dropout, makes refusal harder to remove.
+With self-distillation, a perturbed copy of a safety-tuned model learns to match the frozen original, so only the internal representation of refusal changes.
+We test this on Qwen3.5-0.8B against abliteration, weight pruning, prefilling and LoRA, with controls and three seeds per condition.
+
+% ============================================================
+\section{Introduction and Background}
+\textbf{Refusal is concentrated.}
+\citet{arditi2024refusal} show that refusal is mediated by one residual-stream direction, which a rank-one weight edit (abliteration) removes.
+\citet{wollschlager2025geometry} find that refusal actually spans multi-dimensional cones of several independent directions.
+\citet{wei2024brittleness} show that safety depends on about 3\% of the weights, whose removal breaks safety but keeps utility.
+\citet{qi2024finetuning} undo safety with a few fine-tuning examples, and \citet{qi2025shallow} show that alignment mostly shapes the first few output tokens, so prefilling bypasses it.
+
+\textbf{Defenses.}
+TAR \citep{tamirisa2025tar} uses adversarial meta-learning against fine-tuning, but \citet{kuo2026simple} show that abliteration and prefilling break such defenses.
+ReFAT \citep{yu2025refat} and DeepRefusal \citep{xie2025deeprefusal} ablate the refusal direction during safety fine-tuning and gain robustness to abliteration, but they also train on refusal data, mixing new behavior with new representations.
+Decoy directions \citep{muhamed2026decoy} make abliteration remove a harmless feature, and refusal aliases \citep{truong2026alias} make the true direction hard to extract.
+
+\textbf{Dropout.}
+Dropout prevents units from co-adapting \citep{srivastava2014dropout}, and models pretrained without dropout are easier to edit \citep{liu2025dropdropout}, which suggests that dropout spreads knowledge over redundant pathways.
+
+% ============================================================
+\section{Key Questions}
+\textbf{Q1.} With behavior held fixed, does training under random ablation of the refusal direction make refusal robust to abliteration, including multi-direction abliteration?
+\textbf{Q2.} Is the effect specific to the refusal direction, and does it extend to pruning, prefilling and LoRA?
+\textbf{Q3.} How many directions must be removed to break refusal afterward, and does recomputing the direction during training matter?
+
+% ============================================================
+\section{Hypothesis}
+Because the student must refuse whenever the refusal direction is erased, it will encode refusal in additional directions: single-direction abliteration will fail and more directions will be needed to break refusal, while the controls will have little effect.
+Recomputing the direction will matter, since with a fixed direction the model can move refusal to one new direction that the attacker then finds.
+We expect little effect on pruning, some gain against prefilling as for DeepRefusal, and none against LoRA \citep{qi2024finetuning,kuo2026simple}.
+
+% ============================================================
+\section{Methods}
+\textbf{Self-distillation.}
+A student $S_\theta$, initialized from a frozen safety-tuned teacher $T$, runs under a random perturbation $\xi$ during training only and minimizes
+$\mathbb{E}_{x,\xi}\sum_t \mathrm{KL}\big(p_T(\cdot\mid x,y_{<t})\,\|\,p^{\xi}_{S_\theta}(\cdot\mid x,y_{<t})\big)$
+on the teacher's greedy responses $y$ \citep{hinton2015distilling}.
+With no perturbation the loss is zero, so every weight change comes from reproducing the teacher under perturbation, not from more safety training.
+
+\textbf{Directional dropout.}
+With probability $q\in\{0.25,0.5\}$ per layer, $h\leftarrow h-(\rdir^{\top}h)\,\rdir$ at all positions, where $\rdir$ is the harmful-minus-harmless difference in means \citep{arditi2024refusal}, recomputed from the student every $K$ steps.
+
+\textbf{Conditions.}
+(1)~Original model.
+(2)~Residual-stream noise with matched norm.
+(3)~Random-direction dropout.
+(4)~Directional dropout, plus two variants: a fixed direction from the teacher, and the top 3 directions instead of 1.
+
+\textbf{Models, code and data.}
+Qwen3.5-0.8B (thinking off), with Llama~3.2~1B~Instruct as an optional replication.
+We use PyTorch with forward hooks, the released code of \citet{arditi2024refusal} and \citet{wei2024brittleness}, PEFT and vLLM.
+Training uses about 5{,}000 benign and 1{,}000 harmful prompts (AdvBench \citep{zou2023universal}, HarmBench validation \citep{mazeika2024harmbench}), with the teacher's own responses as targets, so we write no new harmful content.
+Testing uses the HarmBench test split, StrongREJECT \citep{souly2024strongreject} and XSTest \citep{rottger2024xstest}, deduplicated against training.
+
+\textbf{Attacks and evaluation.}
+Attacks, recomputed on each defended model: abliteration of $k=1,\dots,10$ directions with a search over source layers, safety-critical weight pruning (0.5--5\%), prefilling, and a few LoRA steps.
+We measure safety with StrongREJECT's judge, utility with perplexity, an MMLU subset and XSTest over-refusal, and geometry with a harmfulness probe.
+We report training and validation KL curves and 3 seeds with 95\% bootstrap confidence intervals, and release only defended checkpoints.
+
+\textbf{Compute.}
+Each run takes under an hour on an L40S; 5 configurations $\times$ 3 seeds plus tuning is about 25 L40S-hours, and evaluating 16 models about 50 L4-hours. The Llama replication roughly doubles both.
+
+% ============================================================
+\begingroup
+\small
+\setlength{\bibsep}{1pt}
+\begin{thebibliography}{99}
+
+\bibitem[Arditi et~al.(2024)]{arditi2024refusal}
+A.~Arditi, O.~Obeso, A.~Syed, D.~Paleka, N.~Panickssery, W.~Gurnee, and N.~Nanda.
+\newblock Refusal in language models is mediated by a single direction.
+\newblock In \emph{NeurIPS}, 2024.
+
+\bibitem[Hinton et~al.(2015)]{hinton2015distilling}
+G.~Hinton, O.~Vinyals, and J.~Dean.
+\newblock Distilling the knowledge in a neural network.
+\newblock \emph{arXiv:1503.02531}, 2015.
+
+\bibitem[Kuo et~al.(2026)]{kuo2026simple}
+K.~Kuo, V.~Smith, and C.~Yadav.
+\newblock Open-weight LLM fine-tuning defenses are susceptible to simple attacks.
+\newblock \emph{arXiv:2605.26526}, 2026.
+
+\bibitem[Liu et~al.(2025)]{liu2025dropdropout}
+H.~Liu, J.~Bauer, and C.~D. Manning.
+\newblock Drop dropout on single-epoch language model pretraining.
+\newblock In \emph{Findings of ACL}, 2025.
+
+\bibitem[Mazeika et~al.(2024)]{mazeika2024harmbench}
+M.~Mazeika, L.~Phan, X.~Yin, A.~Zou, Z.~Wang, N.~Mu, E.~Sakhaee, N.~Li, S.~Basart, B.~Li, D.~Forsyth, and D.~Hendrycks.
+\newblock HarmBench: A standardized evaluation framework for automated red teaming and robust refusal.
+\newblock In \emph{ICML}, 2024.
+
+\bibitem[Muhamed et~al.(2026)]{muhamed2026decoy}
+A.~Muhamed, M.~T. Diab, and V.~Smith.
+\newblock Decoy direction optimization: A post-hoc defense against LLM abliteration.
+\newblock \emph{arXiv:2609.16204}, 2026.
+
+\bibitem[Qi et~al.(2024)]{qi2024finetuning}
+X.~Qi, Y.~Zeng, T.~Xie, P.-Y. Chen, R.~Jia, P.~Mittal, and P.~Henderson.
+\newblock Fine-tuning aligned language models compromises safety, even when users do not intend to!
+\newblock In \emph{ICLR}, 2024.
+
+\bibitem[Qi et~al.(2025)]{qi2025shallow}
+X.~Qi, A.~Panda, K.~Lyu, X.~Ma, S.~Roy, A.~Beirami, P.~Mittal, and P.~Henderson.
+\newblock Safety alignment should be made more than just a few tokens deep.
+\newblock In \emph{ICLR}, 2025.
+
+\bibitem[R{\"o}ttger et~al.(2024)]{rottger2024xstest}
+P.~R{\"o}ttger, H.~R. Kirk, B.~Vidgen, G.~Attanasio, F.~Bianchi, and D.~Hovy.
+\newblock XSTest: A test suite for identifying exaggerated safety behaviours in large language models.
+\newblock In \emph{NAACL}, 2024.
+
+\bibitem[Souly et~al.(2024)]{souly2024strongreject}
+A.~Souly, Q.~Lu, D.~Bowen, T.~Trinh, E.~Hsieh, S.~Pandey, P.~Abbeel, J.~Svegliato, S.~Emmons, O.~Watkins, and S.~Toyer.
+\newblock A StrongREJECT for empty jailbreaks.
+\newblock In \emph{NeurIPS Datasets and Benchmarks Track}, 2024.
+
+\bibitem[Srivastava et~al.(2014)]{srivastava2014dropout}
+N.~Srivastava, G.~Hinton, A.~Krizhevsky, I.~Sutskever, and R.~Salakhutdinov.
+\newblock Dropout: A simple way to prevent neural networks from overfitting.
+\newblock \emph{JMLR}, 15:1929--1958, 2014.
+
+\bibitem[Tamirisa et~al.(2025)]{tamirisa2025tar}
+R.~Tamirisa, B.~Bharathi, L.~Phan, A.~Zhou, A.~Gatti, T.~Suresh, M.~Lin, J.~Wang, R.~Wang, R.~Arel, A.~Zou, D.~Song, B.~Li, D.~Hendrycks, and M.~Mazeika.
+\newblock Tamper-resistant safeguards for open-weight LLMs.
+\newblock In \emph{ICLR}, 2025.
+
+\bibitem[Truong(2026)]{truong2026alias}
+N.~Truong.
+\newblock Abliteration mitigation via refusal aliases.
+\newblock \emph{arXiv:2608.18093}, 2026.
+
+\bibitem[Wei et~al.(2024)]{wei2024brittleness}
+B.~Wei, K.~Huang, Y.~Huang, T.~Xie, X.~Qi, M.~Xia, P.~Mittal, M.~Wang, and P.~Henderson.
+\newblock Assessing the brittleness of safety alignment via pruning and low-rank modifications.
+\newblock In \emph{ICML}, 2024.
+
+\bibitem[Wollschl{\"a}ger et~al.(2025)]{wollschlager2025geometry}
+T.~Wollschl{\"a}ger, J.~Elstner, S.~Geisler, V.~Cohen-Addad, S.~G{\"u}nnemann, and J.~Gasteiger.
+\newblock The geometry of refusal in large language models: Concept cones and representational independence.
+\newblock In \emph{ICML}, 2025.
+
+\bibitem[Xie et~al.(2025)]{xie2025deeprefusal}
+Y.~Xie, Y.~Zhang, T.~Liu, D.~Ma, and T.~Liu.
+\newblock Beyond surface alignment: Rebuilding LLMs safety mechanism via probabilistically ablating refusal direction.
+\newblock In \emph{Findings of EMNLP}, 2025.
+
+\bibitem[Yu et~al.(2025)]{yu2025refat}
+L.~Yu, V.~Do, K.~Hambardzumyan, and N.~Cancedda.
+\newblock Robust LLM safeguarding via refusal feature adversarial training.
+\newblock In \emph{ICLR}, 2025.
+
+\bibitem[Zou et~al.(2023)]{zou2023universal}
+A.~Zou, Z.~Wang, N.~Carlini, M.~Nasr, J.~Z. Kolter, and M.~Fredrikson.
+\newblock Universal and transferable adversarial attacks on aligned language models.
+\newblock \emph{arXiv:2307.15043}, 2023.
+
+\end{thebibliography}
+\endgroup
+
+% ============================================================
+\appendix
+\section*{Appendix: Use of Generative AI Tools}
+% Does not count toward the page limit (course policy).
+We used Claude (Anthropic), to restructure our draft proposal into this format, and to condense it to two pages, and to check the bibliographic details (authors, venues, arXiv numbers) of the cited papers against arXiv, ACL Anthology and conference pages.
+
+\end{document}
